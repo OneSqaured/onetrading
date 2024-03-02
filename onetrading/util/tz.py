@@ -3,9 +3,9 @@ from datetime import datetime
 import pytz
 
 
-def convert_to_utc(date_str: str, original_tz_str: str):
+def convert_to_utc(date_str: str, original_tz_str: str) -> datetime:
     # Parse the date string to a datetime object (assuming date_str is in 'YYYY-MM-DD' format)
-    my_date = datetime.strptime(date_str, '%Y-%m-%d')
+    my_date = datetime.strptime(date_str, "%Y-%m-%d")
 
     # Get the original timezone
     original_tz = pytz.timezone(original_tz_str)
