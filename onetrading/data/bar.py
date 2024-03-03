@@ -122,6 +122,27 @@ def aggregate_imbalance_bars(
     clock: str,
 ) -> pd.DataFrame:
 
+    result = []
+    for symbol in tick_df["symbol"].unique():
+        data = tick_df[tick_df["symbol"] == symbol].reset_index(drop=True)
+        result.append(
+            aggregate_imbalance_bars_for_symbol(
+                data, initial_size, alpha, max_imbalance, clock
+            )
+        )
+
+    imbalance_bars = pd.concat(result, ignore_index=True)
+    return imbalance_bars
+
+
+def aggregate_imbalance_bars_for_symbol(
+    tick_df: pd.DataFrame,
+    initial_size: int,
+    alpha: float,
+    max_imbalance: float,
+    clock: str,
+) -> pd.DataFrame:
+
     tick_df["diff_price"] = tick_df["price"].diff()
 
     # create b_t
@@ -140,7 +161,7 @@ def aggregate_imbalance_bars(
 
     sample_idx = np.zeros(len(tick_df))
     sample_idx[initial_size] = 1  # new group at this index
-    exp_imbalance = abs(tick_df["tick_direction"][0:initial_size].sum())
+    exp_imbalance = abs(tick_direction[:initial_size].sum())
     exp_ticks = initial_size
 
     last_i = initial_size
@@ -158,6 +179,103 @@ def aggregate_imbalance_bars(
             imbalance = tick_direction[last_i:i].sum()
         else:
             imbalance += tick_direction[i]
+            i += 1
+
+    pd.options.mode.chained_assignment = None
+    tick_df["sample_idx"] = sample_idx
+    tick_df["bar_num"] = tick_df["sample_idx"].cumsum()
+    pd.options.mode.chained_assignment = "warn"
+
+    tick_df = (
+        tick_df.groupby(["symbol", "bar_num"])
+        .agg(
+            {
+                "ts_event": "last",
+                "price": "ohlc",
+                "size": "sum",
+                "dollar_amount": "sum",
+            }
+        )
+        .reset_index()
+    )
+
+    tick_df = flatten_multi_index_columns(tick_df)
+
+    return tick_df
+
+
+def aggregate_run_bars(
+    tick_df: pd.DataFrame,
+    initial_size: int,
+    alpha: float,
+    max_run: float,
+    clock: str,
+) -> pd.DataFrame:
+
+    result = []
+    for symbol in tick_df["symbol"].unique():
+        data = tick_df[tick_df["symbol"] == symbol].reset_index(drop=True)
+        result.append(
+            aggregate_run_bars_for_symbol(data, initial_size, alpha, max_run, clock)
+        )
+
+    run_bars = pd.concat(result, ignore_index=True)
+    return run_bars
+
+
+def aggregate_run_bars_for_symbol(
+    tick_df: pd.DataFrame,
+    initial_size: int,
+    alpha: float,
+    max_run: float,
+    clock: str,
+) -> pd.DataFrame:
+
+    tick_df["diff_price"] = tick_df["price"].diff()
+
+    # create b_t
+    tick_df["tick_direction"] = np.nan
+    tick_df.loc[tick_df["diff_price"] > 0, "tick_direction"] = 1
+    tick_df.loc[tick_df["diff_price"] < 0, "tick_direction"] = -1
+    tick_df["tick_direction"] = tick_df["tick_direction"].ffill()
+    tick_df = tick_df.dropna(ignore_index=True)
+
+    if clock == "tick":
+        tick_direction = np.array(tick_df["tick_direction"])
+    elif clock == "volume":
+        tick_direction = np.array(tick_df["tick_direction"] * tick_df["size"])
+    elif clock == "dollar":
+        tick_direction = np.array(tick_df["tick_direction"] * tick_df["dollar_amount"])
+
+    sample_idx = np.zeros(len(tick_df))
+    sample_idx[initial_size] = 1  # new group at this index
+    exp_runs = max(
+        (tick_direction[:initial_size][tick_direction[:initial_size] > 0]).sum(),
+        -(tick_direction[:initial_size][tick_direction[:initial_size] < 0]).sum(),
+    )
+    exp_ticks = initial_size
+
+    last_i = initial_size
+    i = initial_size + exp_ticks
+    up_runs = (tick_direction[last_i:i][tick_direction[last_i:i] > 0]).sum()
+    down_runs = -(tick_direction[last_i:i][tick_direction[last_i:i] < 0]).sum()
+    while i < len(sample_idx):
+        if up_runs > exp_runs or down_runs > exp_runs:
+            sample_idx[i] = 1
+            exp_runs = alpha * exp_runs + (1 - alpha) * min(
+                max(up_runs, down_runs), max_run
+            )
+            exp_ticks = int(alpha * exp_ticks + (1 - alpha) * (i - last_i))
+            last_i = i
+            i += exp_ticks
+            up_runs = (tick_direction[last_i:i][tick_direction[last_i:i] > 0]).sum()
+            down_runs = -(tick_direction[last_i:i][tick_direction[last_i:i] < 0]).sum()
+
+        else:
+            if tick_direction[i] > 0:
+                up_runs += tick_direction[i]
+            else:
+                down_runs += -tick_direction[i]
             i += 1
 
     pd.options.mode.chained_assignment = None
@@ -262,6 +380,36 @@ def sample_dollar_imbalance_bar(
     imbalance_bars = finalize_bars(bars_df)
 
     return imbalance_bars
+
+
+def sample_tick_run_bar(
+    tick_df: pd.DataFrame, initial_size: int, alpha: float, max_run: float
+) -> pd.DataFrame:
+    tick_df = preprocess_tick_data(tick_df)
+    bars_df = aggregate_run_bars(tick_df, initial_size, alpha, max_run, "tick")
+    run_bars = finalize_bars(bars_df)
+
+    return run_bars
+
+
+def sample_volume_run_bar(
+    tick_df: pd.DataFrame, initial_size: int, alpha: float, max_run: float
+) -> pd.DataFrame:
+    tick_df = preprocess_tick_data(tick_df)
+    bars_df = aggregate_run_bars(tick_df, initial_size, alpha, max_run, "volume")
+    run_bars = finalize_bars(bars_df)
+
+    return run_bars
+
+
+def sample_dollar_run_bar(
+    tick_df: pd.DataFrame, initial_size: int, alpha: float, max_run: float
+) -> pd.DataFrame:
+    tick_df = preprocess_tick_data(tick_df)
+    bars_df = aggregate_run_bars(tick_df, initial_size, alpha, max_run, "dollar")
+    run_bars = finalize_bars(bars_df)
+
+    return run_bars
 
 
 def get_time_bar(
@@ -589,6 +737,88 @@ def get_dollar_imbalance_bar(
     return imbalance_bar
 
 
+def get_tick_run_bar(
+    symbol: list[str] = None,
+    start_date: str = None,
+    end_date: str = None,
+    tz: str = "UTC",
+    initial_size: int = 1000,
+    alpha: float = 0.97,
+    max_run: float = 1000,
+) -> pd.DataFrame:
+    """
+    Fetches tick run bars from raw tick data based on the specified conditions.
+    :param symbol:
+    :param start_date:
+    :param end_date:
+    :param tz:
+    :param initial_size:
+    :param alpha:
+    :param max_run:
+    :return:
+    """
+
+    tick_df = fetch_and_prepare_tick_data(symbol, start_date, end_date, tz)
+    run_bars = sample_tick_run_bar(tick_df, initial_size, alpha, max_run)
+
+    return run_bars
+
+
+def get_volume_run_bar(
+    symbol: list[str] = None,
+    start_date: str = None,
+    end_date: str = None,
+    tz: str = "UTC",
+    initial_size: int = 1000,
+    alpha: float = 0.97,
+    max_run: float = 5000,
+) -> pd.DataFrame:
+    """
+    Fetches volume run bars from raw tick data based on the specified conditions.
+
+    :param symbol:
+    :param start_date:
+    :param end_date:
+    :param tz:
+    :param initial_size:
+    :param alpha:
+    :param max_run:
+    :return:
+    """
+
+    tick_df = fetch_and_prepare_tick_data(symbol, start_date, end_date, tz)
+    run_bars = sample_volume_run_bar(tick_df, initial_size, alpha, max_run)
+
+    return run_bars
+
+
+def get_dollar_run_bar(
+    symbol: list[str] = None,
+    start_date: str = None,
+    end_date: str = None,
+    tz: str = "UTC",
+    initial_size: int = 1000,
+    alpha: float = 0.97,
+    max_run: float = 2000000,
+) -> pd.DataFrame:
+    """
+    Fetches dollar run bars from raw tick data based on the specified conditions.
+    :param symbol:
+    :param start_date:
+    :param end_date:
+    :param tz:
+    :param initial_size:
+    :param alpha:
+    :param max_run:
+    :return:
+    """
+
+    tick_df = fetch_and_prepare_tick_data(symbol, start_date, end_date, tz)
+    run_bars = sample_dollar_run_bar(tick_df, initial_size, alpha, max_run)
+
+    return run_bars
+
+
 class Bar:
     def __init__(self, symbol: str, tz: str = "UTC"):
         self.symbol = symbol
@@ -692,4 +922,49 @@ class DollarImbalanceBar(Bar):
             initial_size,
             alpha,
             max_imbalance,
+        )
+
+
+class TickRunBar(Bar):
+
+    def get_bar(
+        self,
+        start_date: str = None,
+        end_date: str = None,
+        initial_size: int = 1000,
+        alpha: float = 0.97,
+        max_run: float = 1000,
+    ):
+        return get_tick_run_bar(
+            [self.symbol], start_date, end_date, self.tz, initial_size, alpha, max_run
+        )
+
+
+class VolumeRunBar(Bar):
+
+    def get_bar(
+        self,
+        start_date: str = None,
+        end_date: str = None,
+        initial_size: int = 1000,
+        alpha: float = 0.97,
+        max_run: float = 5000,
+    ):
+        return get_volume_run_bar(
+            [self.symbol], start_date, end_date, self.tz, initial_size, alpha, max_run
+        )
+
+
+class DollarRunBar(Bar):
+
+    def get_bar(
+        self,
+        start_date: str = None,
+        end_date: str = None,
+        initial_size: int = 1000,
+        alpha: float = 0.97,
+        max_run: float = 2000000,
+    ):
+        return get_dollar_run_bar(
+            [self.symbol], start_date, end_date, self.tz, initial_size, alpha, max_run
         )
