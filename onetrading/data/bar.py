@@ -1,9 +1,43 @@
 import numpy as np
 import pandas as pd
+import pandas_market_calendars as mcal
 
 from onetrading.data import get_tick
 
 import pandas as pd
+
+
+def filter_bars_for_market_open(
+    bar_data: pd.DataFrame,
+    start_date: str,
+    end_date: str,
+    market: str = "CME_Equity",
+    tz: str = "UTC",
+) -> pd.DataFrame:
+
+    cme = mcal.get_calendar(market)
+    schedule = cme.schedule(start_date=start_date, end_date=end_date)
+    schedule["market_open_local"] = pd.to_datetime(
+        schedule["market_open"]
+    ).dt.tz_convert(tz)
+    schedule["market_close_local"] = pd.to_datetime(
+        schedule["market_close"]
+    ).dt.tz_convert(tz)
+
+    result = []
+
+    for index, row in schedule.iterrows():
+        # Filter tick_data for the current day
+        day_tick_data = bar_data[
+            (bar_data["ts_event"] >= row["market_open_local"])
+            & (bar_data["ts_event"] <= row["market_close_local"])
+        ]
+        # Append to the filtered DataFrame
+        result.append(day_tick_data)
+
+    filtered_bar_data = pd.concat(result, ignore_index=True)
+
+    return filtered_bar_data
 
 
 def flatten_multi_index_columns(df: pd.DataFrame) -> pd.DataFrame:
